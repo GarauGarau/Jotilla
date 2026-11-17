@@ -12,6 +12,81 @@ static void clipboard_fixture(HWND owner, const wchar_t *text) {
     require(CloseClipboard(), "release test clipboard");
 }
 
+typedef struct {
+    IDropSourceVtbl *lpVtbl;
+} TestDropSource;
+static HRESULT WINAPI test_drop_query_interface(IDropSource *source, REFIID iid, void **object) {
+    if (!object) return E_POINTER;
+    *object = NULL;
+    if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IDropSource)) {
+        *object = source;
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI test_drop_add_ref(IDropSource *source) { (void)source; return 1; }
+static ULONG WINAPI test_drop_release(IDropSource *source) { (void)source; return 1; }
+static HRESULT WINAPI test_drop_continue(IDropSource *source, BOOL escape, DWORD keys) {
+    (void)source; (void)escape; (void)keys; return DRAGDROP_S_DROP;
+}
+static HRESULT WINAPI test_drop_feedback(IDropSource *source, DWORD effect) {
+    (void)source; (void)effect; return DRAGDROP_S_USEDEFAULTCURSORS;
+}
+static IDropSourceVtbl test_drop_vtable = {
+    test_drop_query_interface, test_drop_add_ref, test_drop_release, test_drop_continue, test_drop_feedback
+};
+
+static void external_drop_check(Note *note) {
+    static const wchar_t marker[] = L"External drag must remain a copy";
+    TestDropSource source = {&test_drop_vtable};
+    IRichEditOle *rich_ole = NULL;
+    IDataObject *data = NULL;
+    CHARRANGE selection;
+    HWND external;
+    RECT window, edit_bounds;
+    POINT cursor;
+    DWORD effect = 0;
+    HRESULT result;
+    wchar_t text[256];
+    require(SUCCEEDED(OleInitialize(NULL)), "initialize OLE for external drop");
+    external = CreateWindowExW(0, MSFTEDIT_CLASS, NULL, WS_CHILD | ES_MULTILINE,
+                               0, 0, 300, 200, controller, NULL, instance, NULL);
+    require(external != NULL, "create external text source");
+    SetWindowTextW(external, marker);
+    SendMessageW(external, EM_GETOLEINTERFACE, 0, (LPARAM)&rich_ole);
+    require(rich_ole != NULL, "get external text OLE interface");
+    selection.cpMin = 0;
+    selection.cpMax = GetWindowTextLengthW(external);
+    require(SUCCEEDED(rich_ole->lpVtbl->GetClipboardData(rich_ole, &selection, RECO_COPY, &data)) && data,
+            "create external drag data");
+    GetCursorPos(&cursor);
+    GetWindowRect(note->window, &window);
+    GetWindowRect(note->edit, &edit_bounds);
+    SetWindowPos(note->window, NULL, cursor.x - (edit_bounds.left - window.left) - 20,
+                 cursor.y - (edit_bounds.top - window.top) - 20, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    ShowWindow(note->window, SW_SHOWNOACTIVATE);
+    UpdateWindow(note->window);
+    result = DoDragDrop(data, (IDropSource *)&source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &effect);
+    GetWindowTextW(note->edit, text, 256);
+    require(SUCCEEDED(result) && effect == DROPEFFECT_COPY && !wcscmp(text, marker),
+            "external text drop reports COPY and preserves the source text");
+    GetWindowTextW(external, text, 256);
+    require(!wcscmp(text, marker), "external drag source retains its selected text");
+    SetFocus(note->edit);
+    effect = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+    note->ole_callback.lpVtbl->GetDragDropEffect((IRichEditOleCallback *)&note->ole_callback, TRUE, 0, &effect);
+    note->ole_callback.lpVtbl->GetDragDropEffect((IRichEditOleCallback *)&note->ole_callback, FALSE, 0, &effect);
+    require(effect == (DROPEFFECT_COPY | DROPEFFECT_MOVE) && !note->ole_callback.internal_drag,
+            "dragging within one note retains the native copy-or-move behavior");
+    data->lpVtbl->Release(data);
+    rich_ole->lpVtbl->Release(rich_ole);
+    DestroyWindow(external);
+    ShowWindow(note->window, SW_HIDE);
+    OleUninitialize();
+    puts("PASS: external OLE text drops copy instead of moving; internal drags retain native behavior.");
+}
+
 static void shift_insert(Note *note) {
     BYTE previous[256], state[256] = {0};
     require(GetKeyboardState(previous), "read Shift+Insert keyboard state");
@@ -29,6 +104,7 @@ static void clipboard_checks(void) {
     unsigned expected = 0;
     int i;
     require(note != NULL, "create clipboard note");
+    external_drop_check(note);
     external = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_MULTILINE,
                                0, 0, 400, 300, controller, NULL, instance, NULL);
     require(external != NULL, "create independent plain-text clipboard destination");

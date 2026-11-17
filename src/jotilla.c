@@ -7,6 +7,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <richedit.h>
+#include <richole.h>
 #include <commdlg.h>
 #include <commctrl.h>
 #include <tom.h>
@@ -51,6 +52,11 @@
 #define CMD_PALETTE 400
 
 typedef struct Note Note;
+typedef struct {
+    IRichEditOleCallbackVtbl *lpVtbl;
+    Note *note;
+    BOOL internal_drag;
+} NoteOleCallback;
 enum {
     LAYOUT_X, LAYOUT_Y, LAYOUT_COLOR, LAYOUT_TITLE, LAYOUT_COLLAPSED, LAYOUT_OPEN,
     LAYOUT_PALETTE, LAYOUT_SIZE, LAYOUT_OPACITY, LAYOUT_WIDTH, LAYOUT_HEIGHT, LAYOUT_CUSTOM_INK, LAYOUT_SCROLL, LAYOUT_COUNT
@@ -63,6 +69,7 @@ struct Note {
     HWND window, edit;
     WNDPROC edit_proc;
     ITextDocument *document;
+    NoteOleCallback ole_callback;
     HBRUSH brush;
     HFONT font;
     HPEN pen;
@@ -82,6 +89,70 @@ struct Note {
     BOOL custom_ink;
     BOOL collapsed, ready, tags_dirty, save_failed, validating, layout_saved, persisted, tracking;
     BOOL edit_overflow, scrolling;
+};
+
+static HRESULT WINAPI ole_query_interface(IRichEditOleCallback *callback, REFIID iid, void **object) {
+    if (!object) return E_POINTER;
+    *object = NULL;
+    if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IRichEditOleCallback)) {
+        *object = callback;
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI ole_add_ref(IRichEditOleCallback *callback) { (void)callback; return 1; }
+static ULONG WINAPI ole_release(IRichEditOleCallback *callback) { (void)callback; return 1; }
+static HRESULT WINAPI ole_new_storage(IRichEditOleCallback *callback, IStorage **storage) {
+    (void)callback; (void)storage; return E_NOTIMPL;
+}
+static HRESULT WINAPI ole_in_place_context(IRichEditOleCallback *callback, IOleInPlaceFrame **frame,
+                                           IOleInPlaceUIWindow **document, LPOLEINPLACEFRAMEINFO info) {
+    (void)callback; (void)frame; (void)document; (void)info; return E_NOTIMPL;
+}
+static HRESULT WINAPI ole_show_container(IRichEditOleCallback *callback, BOOL show) {
+    (void)callback; (void)show; return E_NOTIMPL;
+}
+static HRESULT WINAPI ole_insert_object(IRichEditOleCallback *callback, CLSID *clsid, IStorage *storage, LONG cp) {
+    (void)callback; (void)clsid; (void)storage; (void)cp; return E_NOTIMPL;
+}
+static HRESULT WINAPI ole_delete_object(IRichEditOleCallback *callback, IOleObject *object) {
+    (void)callback; (void)object; return E_NOTIMPL;
+}
+static HRESULT WINAPI ole_accept_data(IRichEditOleCallback *callback, IDataObject *data, CLIPFORMAT *format,
+                                      DWORD operation, BOOL really, HGLOBAL metafile) {
+    (void)callback; (void)data; (void)format; (void)operation; (void)really; (void)metafile; return E_NOTIMPL;
+}
+static HRESULT WINAPI ole_context_help(IRichEditOleCallback *callback, BOOL enter) {
+    (void)callback; (void)enter; return E_NOTIMPL;
+}
+static HRESULT WINAPI ole_clipboard_data(IRichEditOleCallback *callback, CHARRANGE *range,
+                                         DWORD operation, IDataObject **data) {
+    (void)callback; (void)range; (void)operation; (void)data; return E_NOTIMPL;
+}
+static HRESULT WINAPI ole_drag_drop_effect(IRichEditOleCallback *callback, BOOL drag, DWORD keys, DWORD *effect) {
+    NoteOleCallback *ole = (NoteOleCallback *)callback;
+    if (drag) {
+        ole->internal_drag = GetFocus() == ole->note->edit;
+        return E_NOTIMPL;
+    }
+    /* External text defaults to copy; explicit move modifiers and native
+       movement inside the same editor retain Rich Edit's original behavior. */
+    if (!ole->internal_drag && !(keys & (MK_ALT | MK_SHIFT)) && (*effect & DROPEFFECT_COPY)) {
+        *effect = DROPEFFECT_COPY;
+        ole->internal_drag = FALSE;
+        return S_OK;
+    }
+    ole->internal_drag = FALSE;
+    return E_NOTIMPL;
+}
+static HRESULT WINAPI ole_context_menu(IRichEditOleCallback *callback, WORD selection, IOleObject *object,
+                                       CHARRANGE *range, HMENU *menu) {
+    (void)callback; (void)selection; (void)object; (void)range; (void)menu; return E_NOTIMPL;
+}
+static IRichEditOleCallbackVtbl ole_callback_vtable = {
+    ole_query_interface, ole_add_ref, ole_release, ole_new_storage, ole_in_place_context,
+    ole_show_container, ole_insert_object, ole_delete_object, ole_accept_data, ole_context_help,
+    ole_clipboard_data, ole_drag_drop_effect, ole_context_menu
 };
 static const SIZE NOTE_SIZES[] = {{240,180}, {NOTE_WIDTH,NOTE_HEIGHT}, {420,340}, {540,440}, {300,300}};
 static const wchar_t *SIZE_NAMES[] = {L"Small", L"Medium", L"Large", L"Extra large", L"Square"};
@@ -1550,10 +1621,13 @@ static LRESULT CALLBACK note_proc(HWND window, UINT message, WPARAM wparam, LPAR
             editor->lpVtbl->Release(editor);
             if (!note->document) return -1;
         }
+        note->ole_callback.lpVtbl = &ole_callback_vtable;
+        note->ole_callback.note = note;
+        SendMessageW(note->edit, EM_SETOLECALLBACK, 0, (LPARAM)&note->ole_callback);
         note->edit_proc = (WNDPROC)SetWindowLongPtrW(note->edit, GWLP_WNDPROC, (LONG_PTR)edit_proc);
         SendMessageW(note->edit, EM_SETLIMITTEXT, TEXT_LIMIT, 0);
         SendMessageW(note->edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(0, 0));
-        SendMessageW(note->edit, EM_SETEVENTMASK, 0, ENM_CHANGE | ENM_REQUESTRESIZE | ENM_SELCHANGE);
+        SendMessageW(note->edit, EM_SETEVENTMASK, 0, ENM_CHANGE | ENM_REQUESTRESIZE | ENM_SELCHANGE | ENM_DRAGDROPDONE);
         SendMessageW(note->edit, EM_SETUNDOLIMIT, 100, 0);
         note->date_tip = CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,NULL,WS_POPUP|TTS_ALWAYSTIP,
             0,0,0,0,window,NULL,instance,NULL);
@@ -1656,7 +1730,9 @@ static LRESULT CALLBACK note_proc(HWND window, UINT message, WPARAM wparam, LPAR
             ((NMTTDISPINFOW *)lparam)->lpszText=note->date_label; return 0;
         }
         if (((NMHDR *)lparam)->hwndFrom == note->edit) {
-            if (((NMHDR *)lparam)->code == EN_REQUESTRESIZE) {
+            if (((NMHDR *)lparam)->code == EN_DRAGDROPDONE) {
+                note->ole_callback.internal_drag = FALSE;
+            } else if (((NMHDR *)lparam)->code == EN_REQUESTRESIZE) {
                 const RECT *rect = &((REQRESIZE *)lparam)->rc;
                 note->text_extent.cx = rect->right - rect->left;
                 note->text_extent.cy = rect->bottom - rect->top;
