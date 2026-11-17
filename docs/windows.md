@@ -33,6 +33,10 @@ apps. **Shift + Insert** also pastes. With scrolling off, if the pasted text exc
 space, an information dialog explains how to proceed: enlarge the note or paste
 less text. The existing text, formatting and selection are preserved.
 
+Dragging text from another application into a note copies it by default and keeps
+the original text in its source. Dragging within the same note and explicit move
+modifiers retain their native behavior.
+
 Right-click the note's title bar and choose **Scrollable text**. The dialog offers
 **Only this note** or **This note and new notes**. Text wraps to the note width.
 Use the mouse wheel, Page Up/Down or Ctrl+Home/End to navigate longer text;
